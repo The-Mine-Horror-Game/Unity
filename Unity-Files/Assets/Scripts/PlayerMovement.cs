@@ -1,5 +1,3 @@
-using JetBrains.Annotations;
-using Unity.VisualScripting;
 using UnityEngine;
 
 public class PlayerMovement : MonoBehaviour
@@ -21,6 +19,13 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private bool canSprint = true;
 
 
+    private enum MovementState
+    {
+        walking,
+        sprinting,
+        crouching,
+        air
+    }
     // These determine how fast the player moves, and some other required variables
     [Header("Movement Parameters")] 
     [SerializeField] private float moveSpeed;
@@ -33,16 +38,8 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private float jumpCooldown;
     [SerializeField] private float airMultiplier;
     [SerializeField] private bool readyToJump = true;
-    [SerializeField] private MovementState currentState;
+    [SerializeField] MovementState currentState;
     [SerializeField] private Transform orientationObj;
-
-    private enum MovementState
-    {
-        walking,
-        sprinting,
-        crouching,
-        air
-    }
 
     [Header("Grounded Parameters")] 
     [SerializeField] private float groundDrag;
@@ -54,17 +51,21 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private float crouchSpeed;
     [SerializeField] private float crouchYScale;
     [SerializeField] private float startYScale;
+    [SerializeField] private bool isCrouching;
     // This was a proposed feature to have a toggle crouch, it's still in the air whether we'll implement it. This bool would enable or disable the feature.
     //public bool toggleCrouch = false;
+    
+    [Header("Slope Parameters")]
+    [SerializeField] private float maxSlopeAngle;
+    private RaycastHit slopeHit;
+    [SerializeField] private bool exitingSlope;
     
 
     // This is less self-explanatory. PlayerControls is the input system we have for all the input action maps in the game. It needs to be initialised in void Awake to function properly.
     // Read up on the Unity Input System to learn more.
     private PlayerControls playerControls;
-    
-    // These are 
-    private Vector2 currentInput;
-    
+    [SerializeField] Vector2 currentInput;
+
     private void Start()
     {
         playerControls = new PlayerControls();
@@ -73,6 +74,7 @@ public class PlayerMovement : MonoBehaviour
 
         playerRigidBody.freezeRotation = true;
         startYScale = transform.localScale.y;
+        currentState = MovementState.walking;
     }
 
     private void Update()
@@ -108,14 +110,16 @@ public class PlayerMovement : MonoBehaviour
         }
         
         // Start crouch
-        if (playerControls.Player.Crouch.WasPressedThisFrame())
+        if (playerControls.Player.Crouch.WasPressedThisFrame() && !isCrouching)
         {
+            isCrouching = !isCrouching;
             transform.localScale = new Vector3(transform.localScale.x, crouchYScale, transform.localScale.z);
             playerRigidBody.AddForce(Vector3.down * 5f, ForceMode.Impulse);
         }
         // Stop crouch
-        else if (playerControls.Player.Crouch.WasReleasedThisFrame())
+        else if (playerControls.Player.Crouch.WasPressedThisFrame() && isCrouching)
         {
+            isCrouching = !isCrouching;
             transform.localScale = new Vector3(transform.localScale.x, startYScale, transform.localScale.z);
         }
     }
@@ -124,6 +128,14 @@ public class PlayerMovement : MonoBehaviour
     {
         moveDirection = orientationObj.forward * currentInput.y + orientationObj.right * currentInput.x;
 
+        if (OnSlope() && !exitingSlope)
+        {
+            playerRigidBody.AddForce(GetSlopeMoveDirection() * (moveSpeed * 20f), ForceMode.Force);
+
+            if (playerRigidBody.velocity.y > 0)
+                playerRigidBody.AddForce(Vector3.down * 80f, ForceMode.Force);
+        }
+        
         switch (isGrounded)
         {
             case true:
@@ -166,7 +178,7 @@ public class PlayerMovement : MonoBehaviour
     {
         switch (isGrounded)
         {
-            case true when playerControls.Player.Crouch.IsInProgress():
+            case true when isCrouching:
                 currentState = MovementState.crouching;
                 moveSpeed = crouchSpeed;
                 break;
@@ -186,6 +198,7 @@ public class PlayerMovement : MonoBehaviour
     
     private void Jump()
     {
+        exitingSlope = true;
         // Reset y velocity
         playerRigidBody.velocity = new Vector3(playerRigidBody.velocity.x, 0f, playerRigidBody.velocity.z);
         
@@ -196,5 +209,22 @@ public class PlayerMovement : MonoBehaviour
     private void ResetJump()
     {
         readyToJump = true;
+        exitingSlope = false;
+    }
+    
+    private bool OnSlope()
+    {
+        if(Physics.Raycast(transform.position, Vector3.down, out slopeHit, playerHeight * 0.5f + 0.3f))
+        {
+            var angle = Vector3.Angle(Vector3.up, slopeHit.normal);
+            return angle < maxSlopeAngle && angle != 0;
+        }
+
+        return false;
+    }
+    
+    private Vector3 GetSlopeMoveDirection()
+    {
+        return Vector3.ProjectOnPlane(moveDirection, slopeHit.normal).normalized;
     }
 }
