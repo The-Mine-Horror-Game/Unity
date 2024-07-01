@@ -31,7 +31,6 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private float moveSpeed;
     [SerializeField] private float walkSpeed = 3.0f;
     [SerializeField] private float sprintSpeed = 6.0f;
-    [SerializeField] private float gravity = 30.0f;
     [SerializeField] private Vector3 moveDirection;
     [SerializeField] private Rigidbody playerRigidBody;
     [SerializeField] private float jumpForce;
@@ -44,6 +43,7 @@ public class PlayerMovement : MonoBehaviour
     [Header("Grounded Parameters")] 
     [SerializeField] private float groundDrag;
     [SerializeField] private float playerHeight;
+    [SerializeField] private float playerWidth;
     [SerializeField] private LayerMask whatIsGround;
     [SerializeField] private bool isGrounded;
 
@@ -51,7 +51,6 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private float crouchSpeed;
     [SerializeField] private float crouchYScale;
     [SerializeField] private float startYScale;
-    [SerializeField] private bool isCrouching;
     // This was a proposed feature to have a toggle crouch, it's still in the air whether we'll implement it. This bool would enable or disable the feature.
     //public bool toggleCrouch = false;
     
@@ -106,20 +105,20 @@ public class PlayerMovement : MonoBehaviour
 
             Jump();
             
+            // This lets you hold down the jump key and keep jumping
             Invoke(nameof(ResetJump), jumpCooldown);
         }
         
         // Start crouch
-        if (playerControls.Player.Crouch.WasPressedThisFrame() && !isCrouching)
+        if (playerControls.Player.Crouch.WasPressedThisFrame())
         {
-            isCrouching = !isCrouching;
             transform.localScale = new Vector3(transform.localScale.x, crouchYScale, transform.localScale.z);
-            playerRigidBody.AddForce(Vector3.down * 5f, ForceMode.Impulse);
+            // Force the player to the ground
+            playerRigidBody.AddForce(Vector3.down * 3f, ForceMode.Impulse);
         }
         // Stop crouch
-        else if (playerControls.Player.Crouch.WasPressedThisFrame() && isCrouching)
+        else if (!playerControls.Player.Crouch.IsInProgress() && CanStand())
         {
-            isCrouching = !isCrouching;
             transform.localScale = new Vector3(transform.localScale.x, startYScale, transform.localScale.z);
         }
     }
@@ -128,37 +127,49 @@ public class PlayerMovement : MonoBehaviour
     {
         moveDirection = orientationObj.forward * currentInput.y + orientationObj.right * currentInput.x;
 
+        // If climbing up a slope, move the player in line with the slope instead of straight into it
         if (OnSlope() && !exitingSlope)
         {
-            playerRigidBody.AddForce(GetSlopeMoveDirection() * (moveSpeed * 20f), ForceMode.Force);
+            playerRigidBody.AddForce(GetSlopeMoveDirection() * (moveSpeed * 10f), ForceMode.Force);
 
-            if (playerRigidBody.velocity.y > 0)
-                playerRigidBody.AddForce(Vector3.down * 80f, ForceMode.Force);
+            //if (playerRigidBody.velocity.y > 0)
+                //playerRigidBody.AddForce(Vector3.down * 80f, ForceMode.Force);
         }
         
-        switch (isGrounded)
+        else if(!Physics.Raycast(transform.position, moveDirection, playerWidth+0.3f))
         {
-            case true:
-                playerRigidBody.AddForce(moveDirection.normalized * (moveSpeed * 10f), ForceMode.Force);
-                break;
-            case false:
-                playerRigidBody.AddForce(moveDirection.normalized * (moveSpeed * (airMultiplier * 10f)), ForceMode.Force);
-                break;
+            switch (isGrounded)
+            {
+                case true:
+                    playerRigidBody.AddForce(moveDirection.normalized * (moveSpeed * 10f), ForceMode.Force);
+                    break;
+                case false:
+                    playerRigidBody.AddForce(moveDirection.normalized * (moveSpeed * (airMultiplier * 10f)), ForceMode.Force);
+                    break;
+            }
         }
+
+        playerRigidBody.useGravity = !OnSlope();
     }
 
     private void SpeedControl()
     {
-        // The velocity of the player without the y component
-        var flatVel = new Vector3(playerRigidBody.velocity.x, 0f, playerRigidBody.velocity.z);
-        
-        // Limit velocity if needed
-        
-        // ReSharper disable once InvertIf
-        if (flatVel.magnitude > moveSpeed)
+        if (OnSlope() && !exitingSlope)
         {
-            var limitedVel = flatVel.normalized * moveSpeed;
-            playerRigidBody.velocity = new Vector3(limitedVel.x, playerRigidBody.velocity.y, limitedVel.z);
+            if (playerRigidBody.velocity.magnitude > moveSpeed)
+                playerRigidBody.velocity = playerRigidBody.velocity.normalized * moveSpeed;
+        }
+        else
+        {
+            // The velocity of the player without the y component
+            var flatVel = new Vector3(playerRigidBody.velocity.x, 0f, playerRigidBody.velocity.z);
+            // Limit velocity if needed
+            // ReSharper disable once InvertIf
+            if (flatVel.magnitude > moveSpeed)
+            {
+                var limitedVel = flatVel.normalized * moveSpeed;
+                playerRigidBody.velocity = new Vector3(limitedVel.x, playerRigidBody.velocity.y, limitedVel.z);
+            }
         }
     }
 
@@ -178,7 +189,7 @@ public class PlayerMovement : MonoBehaviour
     {
         switch (isGrounded)
         {
-            case true when isCrouching:
+            case true when playerControls.Player.Crouch.IsInProgress():
                 currentState = MovementState.crouching;
                 moveSpeed = crouchSpeed;
                 break;
@@ -212,6 +223,7 @@ public class PlayerMovement : MonoBehaviour
         exitingSlope = false;
     }
     
+    // Determines whether the player is on a slope or not
     private bool OnSlope()
     {
         if(Physics.Raycast(transform.position, Vector3.down, out slopeHit, playerHeight * 0.5f + 0.3f))
@@ -223,8 +235,36 @@ public class PlayerMovement : MonoBehaviour
         return false;
     }
     
+    // Returns the proper direction to move in while on a slope
     private Vector3 GetSlopeMoveDirection()
     {
         return Vector3.ProjectOnPlane(moveDirection, slopeHit.normal).normalized;
+    }
+
+    // Send out 5 raycasts in a cross formation to determine whether there is a roof blocking the crouch
+    private bool CanStand()
+    {
+        // Middle
+        if ((Physics.Raycast(transform.position, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        {
+            return false;
+        }
+        // Right
+        if ((Physics.Raycast(transform.position + Vector3.right * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        {
+            return false;
+        }
+        // Left
+        if ((Physics.Raycast(transform.position + Vector3.left * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        {
+            return false;
+        }
+        // Forward
+        if ((Physics.Raycast(transform.position + Vector3.forward * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        {
+            return false;
+        }
+        // Back
+        return !(Physics.Raycast(transform.position + Vector3.back * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f));
     }
 }
