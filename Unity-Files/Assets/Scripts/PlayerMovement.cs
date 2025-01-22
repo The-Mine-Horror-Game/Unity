@@ -1,8 +1,9 @@
+using System;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 public class PlayerMovement : MonoBehaviour
 {
-    
     /*
      * Function:
      * Handles player movement, including walking, crouching, and sprinting
@@ -11,20 +12,16 @@ public class PlayerMovement : MonoBehaviour
      * Jacob Hubbard
      *
      * Created June 6, 2024.
-     * Last Modified June 6, 2024.
+     * Last Modified Oct 23, 2024.
      */
     
-    // If they can sprint, changes during runtime
-    [Header("Functional Options")]
-    [SerializeField] private bool canSprint = true;
-
-
+    // 4 'Movement States', an enum that helps when getting or setting what the player is currently doing
     private enum MovementState
     {
         walking,
         sprinting,
         crouching,
-        air
+        jumping
     }
     // These determine how fast the player moves, and some other required variables
     [Header("Movement Parameters")] 
@@ -35,7 +32,7 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private Rigidbody playerRigidBody;
     [SerializeField] private float jumpForce;
     [SerializeField] private float jumpCooldown;
-    [SerializeField] private float airMultiplier;
+     [SerializeField] private float airSpeedMultiplier;
     [SerializeField] private bool readyToJump = true;
     [SerializeField] MovementState currentState;
     [SerializeField] private Transform orientationObj;
@@ -44,15 +41,13 @@ public class PlayerMovement : MonoBehaviour
     [SerializeField] private float groundDrag;
     [SerializeField] private float playerHeight;
     [SerializeField] private float playerWidth;
-    [SerializeField] private LayerMask whatIsGround;
+     [SerializeField] private LayerMask ground;
     [SerializeField] private bool isGrounded;
 
     [Header("Crouch Parameters")] 
     [SerializeField] private float crouchSpeed;
     [SerializeField] private float crouchYScale;
     [SerializeField] private float startYScale;
-    // This was a proposed feature to have a toggle crouch, it's still in the air whether we'll implement it. This bool would enable or disable the feature.
-    //public bool toggleCrouch = false;
     
     [Header("Slope Parameters")]
     [SerializeField] private float maxSlopeAngle;
@@ -65,12 +60,14 @@ public class PlayerMovement : MonoBehaviour
     private PlayerControls playerControls;
     [SerializeField] Vector2 currentInput;
 
-    private void Start()
+    private void Awake()
     {
         playerControls = new PlayerControls();
-
         playerControls.Player.Enable();
+    }
 
+    private void Start()
+    {
         playerRigidBody.freezeRotation = true;
         startYScale = transform.localScale.y;
         currentState = MovementState.walking;
@@ -79,7 +76,7 @@ public class PlayerMovement : MonoBehaviour
     private void Update()
     {
         // Check whether the player is grounded
-        isGrounded = Physics.Raycast(transform.position, Vector3.down, playerHeight * 0.5f + 0.2f, whatIsGround);
+        isGrounded = Physics.Raycast(transform.position, Vector3.down, playerHeight * 0.5f + 0.2f, ground);
         HandleMovementInput();
         HandleDrag();
         SpeedControl();
@@ -92,13 +89,12 @@ public class PlayerMovement : MonoBehaviour
     }
 
     // Handles keyboard inputs
-    // ReSharper disable Unity.PerformanceAnalysis
     private void HandleMovementInput()
     {
         // Converts wasd inputs into a vector2 of the inputs. Very cool!
         currentInput = playerControls.Player.Movement.ReadValue<Vector2>();
-
-        // ReSharper disable once InvertIf
+        
+        // If player is pressing the jump key, is ready to jump and is grounded, jump
         if (playerControls.Player.Jump.IsInProgress() && readyToJump && isGrounded)
         {
             readyToJump = false;
@@ -108,16 +104,21 @@ public class PlayerMovement : MonoBehaviour
             // This lets you hold down the jump key and keep jumping
             Invoke(nameof(ResetJump), jumpCooldown);
         }
+
+        //if (playerControls.Player.Crouch.IsInProgress() && playerControls.Player.Movement.IsInProgress())
+        //{
+        //    Debug.Log("Is Crouch Walking");
+        //}
         
-        // Start crouch
-        if (playerControls.Player.Crouch.WasPressedThisFrame())
+        // Start crouch if crouch key is pressed and player is not currently crouching
+        if (playerControls.Player.Crouch.WasPressedThisFrame() && currentState != MovementState.crouching)
         {
             transform.localScale = new Vector3(transform.localScale.x, crouchYScale, transform.localScale.z);
             // Force the player to the ground
-            playerRigidBody.AddForce(Vector3.down * 3f, ForceMode.Impulse);
+            playerRigidBody.AddForce(Vector3.down * 30f, ForceMode.Impulse);
         }
         // Stop crouch
-        else if (!playerControls.Player.Crouch.IsInProgress() && CanStand())
+        else if (currentState != MovementState.crouching && CanStand())
         {
             transform.localScale = new Vector3(transform.localScale.x, startYScale, transform.localScale.z);
         }
@@ -136,7 +137,8 @@ public class PlayerMovement : MonoBehaviour
                 //playerRigidBody.AddForce(Vector3.down * 80f, ForceMode.Force);
         }
         
-        else if(!Physics.Raycast(transform.position, moveDirection, playerWidth+0.3f))
+        // If the player is up against a wall, don't push the player into the wall which makes them stick to it
+        else if(!Physics.Raycast(transform.position, moveDirection, playerWidth+0.3f)) 
         {
             switch (isGrounded)
             {
@@ -144,7 +146,7 @@ public class PlayerMovement : MonoBehaviour
                     playerRigidBody.AddForce(moveDirection.normalized * (moveSpeed * 10f), ForceMode.Force);
                     break;
                 case false:
-                    playerRigidBody.AddForce(moveDirection.normalized * (moveSpeed * (airMultiplier * 10f)), ForceMode.Force);
+                    playerRigidBody.AddForce(moveDirection.normalized * (moveSpeed * (airSpeedMultiplier * 10f)), ForceMode.Force);
                     break;
             }
         }
@@ -152,10 +154,12 @@ public class PlayerMovement : MonoBehaviour
         playerRigidBody.useGravity = !OnSlope();
     }
 
+    // Limits the player speed to make sure the player is never going too fast
     private void SpeedControl()
     {
         if (OnSlope() && !exitingSlope)
         {
+            // Stops the player from moving too quickly on slopes
             if (playerRigidBody.velocity.magnitude > moveSpeed)
                 playerRigidBody.velocity = playerRigidBody.velocity.normalized * moveSpeed;
         }
@@ -173,6 +177,8 @@ public class PlayerMovement : MonoBehaviour
         }
     }
 
+    // Makes the player stop when not moving on the ground, but not while in the air
+    // Remove this and simply set drag to big number all the time to have super snappy control at all times
     private void HandleDrag()
     {
         if (isGrounded)
@@ -185,11 +191,14 @@ public class PlayerMovement : MonoBehaviour
         }
     }
 
+    // Handles what movement state the player is in
+    // A better implementation would not require this, as every event that switches between states would change the 'currentState' enum properly, but that's too hard
+    // If optimization is needed, remove this and employ the above
     private void HandleState()
     {
         switch (isGrounded)
         {
-            case true when playerControls.Player.Crouch.IsInProgress():
+            case true when playerControls.Player.Crouch.IsInProgress() || !CanStand():
                 currentState = MovementState.crouching;
                 moveSpeed = crouchSpeed;
                 break;
@@ -202,7 +211,7 @@ public class PlayerMovement : MonoBehaviour
                 moveSpeed = walkSpeed;
                 break;
             default:
-                currentState = MovementState.air;
+                currentState = MovementState.jumping;
                 break;
         }
     }
@@ -210,10 +219,10 @@ public class PlayerMovement : MonoBehaviour
     private void Jump()
     {
         exitingSlope = true;
-        // Reset y velocity
+        // Reset y velocity to 0
         playerRigidBody.velocity = new Vector3(playerRigidBody.velocity.x, 0f, playerRigidBody.velocity.z);
         
-        // Jump
+        // Jump by adding an impulse up
         playerRigidBody.AddForce(transform.up * jumpForce, ForceMode.Impulse);
     }
 
@@ -242,29 +251,35 @@ public class PlayerMovement : MonoBehaviour
     }
 
     // Send out 5 raycasts in a cross formation to determine whether there is a roof blocking the crouch
+    // There's almost definitely a sleeker way to code this, I just can't figure out how. This ain't expensive it's just obtuse code
     private bool CanStand()
     {
+        // If the player is standing (at full scale), there's no case where they should be crouching
+        if (transform.localScale == new Vector3(transform.localScale.x, startYScale, transform.localScale.z))
+        {
+            return true;
+        }
         // Middle
-        if ((Physics.Raycast(transform.position, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        if ((Physics.Raycast(orientationObj.position, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
         {
             return false;
         }
         // Right
-        if ((Physics.Raycast(transform.position + Vector3.right * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        if ((Physics.Raycast(orientationObj.position + Vector3.right * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
         {
             return false;
         }
         // Left
-        if ((Physics.Raycast(transform.position + Vector3.left * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        if ((Physics.Raycast(orientationObj.position + Vector3.left * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
         {
             return false;
         }
         // Forward
-        if ((Physics.Raycast(transform.position + Vector3.forward * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
+        if ((Physics.Raycast(orientationObj.position + Vector3.forward * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f)))
         {
             return false;
         }
         // Back
-        return !(Physics.Raycast(transform.position + Vector3.back * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f));
+        return !(Physics.Raycast(orientationObj.position + Vector3.back * playerWidth, Vector3.up, out slopeHit, playerHeight * crouchYScale + 0.3f));
     }
 }
