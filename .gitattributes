@@ -1,0 +1,9 @@
+# Auto normalize text files to LF in the repo
+* text=auto
+
+# Treat Unity-specific files as binary (avoids line-ending issues)
+*.unity binary
+*.prefab binary
+*.asset binary
+*.mat binary
+*.meta text eol=lf

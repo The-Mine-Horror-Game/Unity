@@ -25,6 +25,17 @@
  
 # Visual Studio cache directory
 .vs/
+
+# JetBrains Rider directory
+.idea/
+
+# Unity logs
+*.log
+
+# Crash dumps & stack traces
+*.dmp
+*.stacktrace
+
  
 # Gradle cache directory
 .gradle/
