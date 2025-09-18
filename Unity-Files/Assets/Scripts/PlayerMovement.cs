@@ -36,7 +36,7 @@ namespace Game.Player
         [SerializeField] private Vector3 moveDirection;
         [SerializeField] private Rigidbody playerRigidBody;
         [SerializeField] private MovementState currentState;
-        [SerializeField] private Transform orientationObj;
+        [SerializeField] private Transform orientation;
 
         [Header("Grounded Parameters")] 
         [SerializeField] private float groundDrag = 4f;
@@ -60,6 +60,31 @@ namespace Game.Player
         [SerializeField] private float headLerpSpeed = 12f;
         [SerializeField] private bool toggleCrouch = false;
         [SerializeField] private bool isCrouching = false;
+        
+        [Header("Lean Parameters")]
+        [SerializeField] private Transform leanPivot;  // assign in Inspector
+        [SerializeField] private Transform rollPivot;  // assign in Inspector
+        [SerializeField] private Transform camTarget;  // assign in Inspector (Cinemachine follows this)
+
+        [SerializeField] private float maxLeanAngleBody = 20f;    // degrees (roll around Z)
+        [SerializeField] private float maxLeanAngleCamera = 12f;
+        [SerializeField] private float leanRadius = 0.28f;    // camera orbital radius to the side
+        [SerializeField] private float leanForward = 0.06f;   // small forward push while leaning
+        [SerializeField] private float leanSpeed = 5f;       // how fast we reach target lean
+        [SerializeField] private float leanReturnSpeed = 6.5f; // speed back to center
+    
+        // Collider displacement so lean is physically blocked by walls:
+        [SerializeField] private float colliderLeanOffsetMax = 0.20f;  // meters sideways
+        [SerializeField] private float colliderSkin = 0.02f;           // inset to avoid clipping
+        [SerializeField] private bool TESTINGBOOL = false;
+
+        private float lean;        // current smoothed [-1..1]
+        private float leanTarget;  // desired input [-1..1]
+        private float capsuleCenterBaseX; // remember the unleaned center
+        
+        [Header("Look Parameters")]
+        [SerializeField] private Transform playerCam; // assigned in editor
+        [SerializeField] private float mouseSensitivity = 0.001f;
 
         [Header("Slope Parameters")]
         [SerializeField] private float maxSlopeAngle = 45f;
@@ -74,6 +99,7 @@ namespace Game.Player
         {
             playerControls = new PlayerControls();
             playerControls.Player.Enable();
+            Cursor.lockState = CursorLockMode.Locked;
         }
 
         private void Start()
@@ -89,6 +115,8 @@ namespace Game.Player
                 // center so feet stay planted
                 capsuleCollider.center = new Vector3(capsuleCollider.center.x, standHeight * 0.5f, capsuleCollider.center.z);
             }
+
+            capsuleCenterBaseX = capsuleCollider.center.x;
         }
 
         private void Update()
@@ -100,8 +128,11 @@ namespace Game.Player
             HandleMovementInput();
             HandleDrag();
             SpeedControl();
-            HandleState();
+            HandleRotate();
+            HandleLean();
             HandleCrouch();
+            HandleState();
+            
         }
 
         private void FixedUpdate()
@@ -141,7 +172,7 @@ namespace Game.Player
 
         private void MovePlayer()
         {
-            moveDirection = orientationObj.forward * currentInput.y + orientationObj.right * currentInput.x;
+            moveDirection = orientation.forward * currentInput.y + orientation.right * currentInput.x;
 
             // If climbing up a slope, move the player in line with the slope instead of straight into it
             if (OnSlope() && !exitingSlope)
@@ -176,6 +207,19 @@ namespace Game.Player
                 var limitedVel = flatVel.normalized * moveSpeed;
                 playerRigidBody.velocity = new Vector3(limitedVel.x, playerRigidBody.velocity.y, limitedVel.z);
             }
+        }
+        
+        private void HandleRotate()
+        {
+            transform.rotation = Quaternion.Euler(0, playerCam.rotation.eulerAngles.y, 0);
+            Vector2 look = playerControls.Player.Look.ReadValue<Vector2>(); // your Input System axis
+
+            var pitch = 0f;
+
+            // PITCH: rotate only headPivot around local X
+            pitch -= look.y * mouseSensitivity;
+            pitch = Mathf.Clamp(pitch, -75, 80);
+            if (headPivot) headPivot.localRotation = Quaternion.Euler(pitch, 0f, 0f);
         }
 
         // Makes the player stop when not moving on the ground, but not while in the air
@@ -250,6 +294,74 @@ namespace Game.Player
             }
         }
 
+        private void HandleLean()
+        {
+            // Input 
+            var leanAxis = playerControls.Player.Lean.ReadValue<float>();
+            var raw = Mathf.Clamp(leanAxis, -1f, 1f);
+
+            // Smooth
+            var speed = Mathf.Approximately(raw, 0f) ? leanReturnSpeed : leanSpeed;
+            leanTarget = raw;
+            lean = Mathf.MoveTowards(lean, leanTarget, speed * Time.deltaTime);
+
+            var bodyAngle = lean * maxLeanAngleBody;
+            var camAngle = lean * maxLeanAngleCamera;
+
+            // Body lean (keeps sideways aligned with player yaw)
+            if (leanPivot) leanPivot.localRotation = Quaternion.Euler(0f, 0f, bodyAngle);
+            
+            // Camera horizon roll
+            if (rollPivot) rollPivot.localRotation = Quaternion.Euler(0f, 0f, camAngle);
+
+            // 4) Camera circular offset (in local space under LeanPivot)
+            if (camTarget)
+            {
+                // Orbit sideways by rotating a base X offset around local Z by the *body* angle
+                var baseOffset = new Vector3(leanRadius, 0f, 0f);
+                var arc = Quaternion.AngleAxis(bodyAngle, Vector3.forward);
+                var orbit = arc * baseOffset;
+
+                var fwd = Mathf.Abs(lean) * leanForward;
+                camTarget.localPosition = new Vector3(orbit.x, camTarget.localPosition.y, fwd);
+                // (y stays whatever your crouch/head system sets)
+            }
+
+            // 5) Collider lateral shift (X-only!) so walls block the lean
+            if (capsuleCollider)
+            {
+                var desiredDeltaX = capsuleCenterBaseX + colliderLeanOffsetMax * lean; // relative to current X
+                var allowedDeltaX = ComputeAllowedLeanOffsetX(desiredDeltaX);
+                var c = capsuleCollider.center;
+                c.x -= allowedDeltaX;
+                capsuleCollider.center = c;
+            }
+        }
+
+        private float ComputeAllowedLeanOffsetX(float targetX)
+        {
+            if (!capsuleCollider) return targetX;
+
+            float radius = Mathf.Max(0.01f, capsuleCollider.radius - colliderSkin);
+            float halfH = Mathf.Max(capsuleCollider.height * 0.5f, radius + 0.001f);
+
+            Vector3 centerWorld = transform.TransformPoint(capsuleCollider.center);
+            Vector3 up = transform.up;
+            Vector3 p1 = centerWorld + up * (halfH - radius);
+            Vector3 p2 = centerWorld - up * (halfH - radius);
+
+            float desiredDelta = targetX - capsuleCenterBaseX;
+            Vector3 side = transform.right * Mathf.Sign(desiredDelta);
+            float distance = Mathf.Abs(desiredDelta);
+
+            if (Physics.CapsuleCast(p1, p2, radius, side, out RaycastHit hit, distance, ground, QueryTriggerInteraction.Ignore))
+            {
+                float allowed = Mathf.Max(0f, hit.distance - colliderSkin);
+                return capsuleCenterBaseX + allowed * Mathf.Sign(desiredDelta);
+            }
+            return targetX;
+        }
+        
         // Determines whether the player is on a slope or not
         private bool OnSlope()
         {
