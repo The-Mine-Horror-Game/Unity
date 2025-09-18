@@ -80,17 +80,25 @@ namespace Game.Player
 
         private float lean;        // current smoothed [-1..1]
         private float leanTarget;  // desired input [-1..1]
-        private float capsuleCenterBaseX; // remember the unleaned center
+        private Vector3 capsuleCenterBase; // remember the unleaned center
         
         [Header("Look Parameters")]
         [SerializeField] private Transform playerCam; // assigned in editor
         [SerializeField] private float mouseSensitivity = 0.001f;
+        [SerializeField] private float minPitch = -75f;
+        [SerializeField] private float maxPitch = 80f;
+        [SerializeField] private float lookSmoothTime = 0.05f; // lower = snappier, higher = smoother
+        
+        private Vector2 currentLook;
+        private Vector2 lookVelocity;
+        private float yaw = 0f;
+        private float pitch = 0f;
 
         [Header("Slope Parameters")]
         [SerializeField] private float maxSlopeAngle = 45f;
         private RaycastHit slopeHit;
         [SerializeField] private bool exitingSlope = false;    // kept for slope logic (no jump sets it true now)
-
+        
         // Input
         private PlayerControls playerControls;
         [SerializeField] private Vector2 currentInput;
@@ -116,7 +124,7 @@ namespace Game.Player
                 capsuleCollider.center = new Vector3(capsuleCollider.center.x, standHeight * 0.5f, capsuleCollider.center.z);
             }
 
-            capsuleCenterBaseX = capsuleCollider.center.x;
+            capsuleCenterBase.x = capsuleCollider.center.x;
         }
 
         private void Update()
@@ -128,11 +136,10 @@ namespace Game.Player
             HandleMovementInput();
             HandleDrag();
             SpeedControl();
-            HandleRotate();
+            HandleLook();
             HandleLean();
             HandleCrouch();
             HandleState();
-            
         }
 
         private void FixedUpdate()
@@ -140,6 +147,7 @@ namespace Game.Player
             MovePlayer();
         }
 
+        // Determines whether the player is grounded
         private void HandleGrounded()
         {
             if (!capsuleCollider)
@@ -208,18 +216,24 @@ namespace Game.Player
                 playerRigidBody.velocity = new Vector3(limitedVel.x, playerRigidBody.velocity.y, limitedVel.z);
             }
         }
-        
-        private void HandleRotate()
+
+        // Handles the camera and player rotation from mouse input
+        private void HandleLook()
         {
-            transform.rotation = Quaternion.Euler(0, playerCam.rotation.eulerAngles.y, 0);
-            Vector2 look = playerControls.Player.Look.ReadValue<Vector2>(); // your Input System axis
+            var rawLook = playerControls.Player.Look.ReadValue<Vector2>();
 
-            var pitch = 0f;
+            // SmoothDamp current look input toward raw input
+            currentLook = Vector2.SmoothDamp(currentLook, rawLook, ref lookVelocity, lookSmoothTime);
 
-            // PITCH: rotate only headPivot around local X
-            pitch -= look.y * mouseSensitivity;
-            pitch = Mathf.Clamp(pitch, -75, 80);
-            if (headPivot) headPivot.localRotation = Quaternion.Euler(pitch, 0f, 0f);
+            // Apply yaw (rotate the player root)
+            yaw += currentLook.x * mouseSensitivity;
+            transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+
+            // Apply pitch (rotate head pivot only)
+            pitch -= currentLook.y * mouseSensitivity;
+            pitch = Mathf.Clamp(pitch, minPitch, maxPitch);
+
+            headPivot.localRotation = Quaternion.Euler(pitch, 0f, 0f);
         }
 
         // Makes the player stop when not moving on the ground, but not while in the air
@@ -330,10 +344,10 @@ namespace Game.Player
             // 5) Collider lateral shift (X-only!) so walls block the lean
             if (capsuleCollider)
             {
-                var desiredDeltaX = capsuleCenterBaseX + colliderLeanOffsetMax * lean; // relative to current X
-                var allowedDeltaX = ComputeAllowedLeanOffsetX(desiredDeltaX);
+                var targetX = capsuleCenterBase.x + colliderLeanOffsetMax * lean * -1f;
+                var safeX = ComputeAllowedLeanOffsetX(targetX);
                 var c = capsuleCollider.center;
-                c.x -= allowedDeltaX;
+                c.x = safeX;   // set absolute X, don’t subtract
                 capsuleCollider.center = c;
             }
         }
@@ -342,23 +356,35 @@ namespace Game.Player
         {
             if (!capsuleCollider) return targetX;
 
-            float radius = Mathf.Max(0.01f, capsuleCollider.radius - colliderSkin);
-            float halfH = Mathf.Max(capsuleCollider.height * 0.5f, radius + 0.001f);
+            var radius = Mathf.Max(0.01f, capsuleCollider.radius - colliderSkin);
+            var halfH  = Mathf.Max(capsuleCollider.height * 0.5f, radius + 0.001f);
 
-            Vector3 centerWorld = transform.TransformPoint(capsuleCollider.center);
-            Vector3 up = transform.up;
-            Vector3 p1 = centerWorld + up * (halfH - radius);
-            Vector3 p2 = centerWorld - up * (halfH - radius);
+            // Start from baseline center (set in Start)
+            var baseCenter = capsuleCenterBase;
+            baseCenter.y = capsuleCollider.center.y; // keep crouch Y
+            baseCenter.z = capsuleCollider.center.z; // keep crouch Z
 
-            float desiredDelta = targetX - capsuleCenterBaseX;
-            Vector3 side = transform.right * Mathf.Sign(desiredDelta);
-            float distance = Mathf.Abs(desiredDelta);
+            // Build world-space capsule
+            var worldCenter = transform.TransformPoint(baseCenter);
+            var up = transform.up;
+            var p1 = worldCenter + up * (halfH - radius);
+            var p2 = worldCenter - up * (halfH - radius);
 
-            if (Physics.CapsuleCast(p1, p2, radius, side, out RaycastHit hit, distance, ground, QueryTriggerInteraction.Ignore))
+            // Desired offset from base
+            var desiredDelta = targetX - capsuleCenterBase.x;
+            if (Mathf.Approximately(desiredDelta, 0f))
+                return capsuleCenterBase.x;
+
+            var side = transform.right * Mathf.Sign(desiredDelta);
+            var distance = Mathf.Abs(desiredDelta);
+
+            // Clamp with wall check
+            if (Physics.CapsuleCast(p1, p2, radius, side, out var hit, distance, ground, QueryTriggerInteraction.Ignore))
             {
-                float allowed = Mathf.Max(0f, hit.distance - colliderSkin);
-                return capsuleCenterBaseX + allowed * Mathf.Sign(desiredDelta);
+                var allowed = Mathf.Max(0f, hit.distance - colliderSkin);
+                return capsuleCenterBase.x + allowed * Mathf.Sign(desiredDelta);
             }
+
             return targetX;
         }
         
